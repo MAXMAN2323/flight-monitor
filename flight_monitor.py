@@ -51,6 +51,11 @@ TARGETS = {
 # 不用很精确——收到提醒后你会自己上携程核对。可按当时汇率改这个数。
 USD_TO_CNY = 7.2
 
+# 每人低于这个金额（人民币）一律视为「无效价格」丢弃。
+# 谷歌对部分航线会返回一个价格为 0 的占位航班，不拦掉就会算出「每人 ¥0」并误触发低价提醒。
+# 跨国往返机票每人绝不可能低于这个数，按此兜底。
+MIN_PRICE_CNY = 200
+
 # 每次查询之间等待的秒数（防止请求太频繁被谷歌限流）
 SLEEP_BETWEEN = 4
 
@@ -78,6 +83,8 @@ def parse_price(price_str):
         amount = float(digits)
     except ValueError:
         return None, "无法解析: %s" % s
+    if amount <= 0:
+        return None, "价格为0/无效: %s" % s
 
     up = s.upper()
     if "¥" in s or "￥" in s or "CNY" in up or "RMB" in up:
@@ -115,6 +122,8 @@ def query_one(origin, dest, depart, ret):
                 if cny_total is None:
                     continue
                 per_person = cny_total / ADULTS  # 谷歌显示的是全部乘客总价 → 折成每人
+                if per_person < MIN_PRICE_CNY:  # 低于兜底线 → 当作占位/异常价，丢弃
+                    continue
                 if best is None or per_person < best:
                     best = per_person
                     best_note = "%s 原价%s [%s]" % (
