@@ -1,0 +1,29 @@
+name: flight-price-monitor
+
+on:
+  schedule:
+    # 每 6 小时运行一次（时间按 UTC，高峰期可能延迟几分钟，属正常现象）
+    - cron: "0 */6 * * *"
+  # 允许在 GitHub 网页上手动点按钮运行（用于测试）
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 运行监控脚本
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python flight_monitor.py
