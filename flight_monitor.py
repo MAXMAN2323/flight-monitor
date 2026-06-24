@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-机票低价监控脚本（fast-flights + PushPlus）—— 为 Max 定制
+机票低价监控脚本（Travelpayouts 数据 API + PushPlus）—— 为 Max 定制
 运行环境：GitHub Actions（每隔几小时自动运行一次，跟你的电脑无关）
 
+为什么用 Travelpayouts 而不是直接抓谷歌：
+谷歌已把航班结果改成「浏览器里用 JS 现加载」，纯抓取（fast-flights 等）一律拿不到数据，
+云端 IP 还会被封。Travelpayouts 是正经数据接口、免费、不被封、云端能跑。
+代价：它给的是「全球用户搜过的最低缓存价」（保留约 7 天），是近似值、且具体日期不一定每次都有数据。
+收到提醒后请务必上携程/Aviasales 核对再下单。
+
 它做的事：
-1. 用 fast-flights v3 抓取 Google Flights（谷歌航班）的【往返】机票价格
-   （v3 用模拟真实 Chrome 的方式直连谷歌，并直接返回人民币价）
-2. 遍历你设定的航线 × 日期组合，取“每人最低价”
+1. 调 Travelpayouts 接口查每条航线的最低往返缓存价（直接要人民币）
+2. 在返回结果里筛出你能接受的出发/返回日期
 3. 低于阈值就通过 PushPlus 推送到你的微信
 """
 
 import os
 import time
-
-from fast_flights import (
-    FlightQuery,
-    Passengers,
-    create_query,
-    get_flights,
-    FlightsNotFound,
-)
 
 try:
     import requests
@@ -29,39 +26,40 @@ except ImportError:
 
 
 # =======================================================================
-#  ↓↓↓ 你可以自己改的配置（改完保存、重新上传到 GitHub 即可生效）↓↓↓
+#  ↓↓↓ 你可以自己改的配置 ↓↓↓
 # =======================================================================
 
-# 乘客人数（经济舱 2 人）
+# 乘客人数（仅用于展示提醒文案；Travelpayouts 的价格本身是「每人往返价」）
 ADULTS = 2
 
-# 出发 / 返回的候选日期，脚本会把它们两两组合（4 个组合）
-DEPART_DATES = ["2026-09-25", "2026-09-26"]
-RETURN_DATES = ["2026-10-06", "2026-10-07"]
+# 北京城市代码（BJS 同时涵盖首都PEK与大兴PKX两个机场）
+ORIGIN = "BJS"
 
-# 北京的两个机场：PEK = 首都，PKX = 大兴
-BEIJING = ["PEK", "PKX"]
+# 你能接受的出发日 / 返回日（脚本会在返回结果里只挑落在这些日子的）
+DEPART_DAYS = {"2026-09-25", "2026-09-26"}
+RETURN_DAYS = {"2026-10-06", "2026-10-07"}
 
-# 监控目标：  名字 -> (出发机场列表, 目的机场列表, 每人价格阈值/人民币)
-#   BKK = 曼谷素万那普   DMK = 曼谷廊曼（廉航多）
-#   CNX = 清迈
-#   MAD = 马德里        BCN = 巴塞罗那
+# 查询用的月份（接口按月返回缓存里的最低价，再由脚本按上面的具体日子筛）
+DEPART_MONTH = "2026-09"
+RETURN_MONTH = "2026-10"
+
+# 监控目标：  名字 -> (目的城市代码列表, 每人往返价阈值/人民币)
+#   BKK = 曼谷   CNX = 清迈   MAD = 马德里   BCN = 巴塞罗那
 TARGETS = {
-    "曼谷":                 (BEIJING, ["BKK", "DMK"], 3000),
-    "清迈":                 (BEIJING, ["CNX"],        3000),
-    "西班牙(马德里/巴塞罗那)": (BEIJING, ["MAD", "BCN"], 6000),
+    "曼谷":                 (["BKK"],        3000),
+    "清迈":                 (["CNX"],        3000),
+    "西班牙(马德里/巴塞罗那)": (["MAD", "BCN"], 6000),
 }
 
-# 向谷歌请求的报价币种。设成 CNY 让谷歌直接返回人民币价，省去汇率换算。
-CURRENCY = "CNY"
+CURRENCY = "cny"  # 让接口直接返回人民币价
 
-# 每人低于这个金额（人民币）一律视为「无效价格」丢弃。
-# 谷歌对部分航线偶尔会返回一个价格为 0 的占位航班，不拦掉就会算出「每人 ¥0」并误触发低价提醒。
-# 跨国往返机票每人绝不可能低于这个数，按此兜底。
+# 每人低于这个金额（人民币）视为无效价，丢弃（防止异常的 0 价误触发）
 MIN_PRICE_CNY = 200
 
-# 每次查询之间等待的秒数（防止请求太频繁被谷歌限流）
-SLEEP_BETWEEN = 4
+# 每次请求之间等待的秒数（礼貌起见，避免触发接口限流）
+SLEEP_BETWEEN = 2
+
+API_URL = "https://api.travelpayouts.com/v1/prices/cheap"
 
 # =======================================================================
 #  ↑↑↑ 配置到此为止，下面的代码一般不用动 ↑↑↑
@@ -69,47 +67,68 @@ SLEEP_BETWEEN = 4
 
 
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN", "").strip()
 
 
-def query_one(origin, dest, depart, ret):
-    """查一个具体往返组合，返回 (该组合每人最低价/人民币, 说明)；失败返回 (None, 错误信息)。"""
-    query = create_query(
-        flights=[
-            FlightQuery(date=depart, from_airport=origin, to_airport=dest),
-            FlightQuery(date=ret,    from_airport=dest,   to_airport=origin),
-        ],
-        trip="round-trip",
-        seat="economy",
-        passengers=Passengers(
-            adults=ADULTS, children=0,
-            infants_in_seat=0, infants_on_lap=0,
-        ),
-        currency=CURRENCY,
-        language="en",
-    )
+def query_dest(dest):
+    """查一个目的地的最低往返缓存价。
+    返回 (落在你接受日期内的最低每人价, 说明) ；查不到返回 (None, 原因)。
+    同时把所有返回条目打印出来，方便你看接口到底给了什么。"""
+    if requests is None:
+        return None, "缺少 requests 库"
     try:
-        result = get_flights(query)
-    except FlightsNotFound:
-        return None, "谷歌没返回航班"
+        r = requests.get(
+            API_URL,
+            params={
+                "origin": ORIGIN,
+                "destination": dest,
+                "depart_date": DEPART_MONTH,
+                "return_date": RETURN_MONTH,
+                "currency": CURRENCY,
+                "token": TRAVELPAYOUTS_TOKEN,
+            },
+            headers={"X-Access-Token": TRAVELPAYOUTS_TOKEN},
+            timeout=30,
+        )
     except Exception as e:  # noqa: BLE001
-        return None, "查询出错: %s" % e
+        return None, "请求出错: %s" % e
 
-    best = None
-    best_note = ""
-    for f in result:
-        price = getattr(f, "price", None)  # v3 直接给数字（已是人民币）
-        if not price or price <= 0:
+    if r.status_code != 200:
+        return None, "HTTP %s: %s" % (r.status_code, r.text[:120])
+    try:
+        body = r.json()
+    except Exception:  # noqa: BLE001
+        return None, "返回非JSON: %s" % r.text[:120]
+    if not body.get("success"):
+        return None, "接口success=false: %s" % str(body.get("error"))[:120]
+
+    entries = (body.get("data") or {}).get(dest) or {}
+    if not entries:
+        return None, "缓存里暂无该航线数据"
+
+    best = None       # (每人价, 出发日, 返回日)
+    cheapest_any = None
+    for _, info in entries.items():
+        price = info.get("price")
+        dep = (info.get("departure_at") or "")[:10]
+        ret = (info.get("return_at") or "")[:10]
+        if not price or price < MIN_PRICE_CNY:
             continue
-        per_person = price / ADULTS  # 谷歌显示的是全部乘客总价 → 折成每人
-        if per_person < MIN_PRICE_CNY:  # 低于兜底线 → 当作占位/异常价，丢弃
-            continue
-        if best is None or per_person < best:
-            best = per_person
-            airlines = getattr(f, "airlines", None) or []
-            best_note = "%s 总价¥%s" % ("/".join(airlines) or "?", price)
+        # 打印每一条，方便诊断数据质量
+        print("      · 出发%s 返回%s 每人¥%s" % (dep or "?", ret or "?", price))
+        if cheapest_any is None or price < cheapest_any[0]:
+            cheapest_any = (price, dep, ret)
+        if dep in DEPART_DAYS and ret in RETURN_DAYS:
+            if best is None or price < best[0]:
+                best = (price, dep, ret)
+
     if best is not None:
-        return best, best_note
-    return None, "未解析到有效价格"
+        return best[0], "出发%s 返回%s（命中你的日期）" % (best[1], best[2])
+    if cheapest_any is not None:
+        # 没有命中你的具体日子，但有别的日期数据——返回 None，附带提示
+        return None, "无命中日期；该月最低是 出发%s 返回%s 每人¥%s" % (
+            cheapest_any[1], cheapest_any[2], cheapest_any[0])
+    return None, "无有效价格"
 
 
 def push_wechat(title, content):
@@ -137,40 +156,39 @@ def push_wechat(title, content):
 
 
 def main():
-    print("=== 机票监控开始 ===")
-    combos = [(d, r) for d in DEPART_DATES for r in RETURN_DATES]
-    alerts = []
+    print("=== 机票监控开始（数据源：Travelpayouts 缓存价）===")
+    if not TRAVELPAYOUTS_TOKEN:
+        print("！未设置 TRAVELPAYOUTS_TOKEN，无法查询。请在 GitHub Secrets 里配置后再运行。")
+        return
 
-    for target_name, (origins, dests, threshold) in TARGETS.items():
+    alerts = []
+    for target_name, (dests, threshold) in TARGETS.items():
         print("\n--- 监控目标：%s（每人阈值 ¥%d）---" % (target_name, threshold))
-        cheapest = None  # (每人价/人民币, 描述)
-        for origin in origins:
-            for dest in dests:
-                for depart, ret in combos:
-                    per_person, note = query_one(origin, dest, depart, ret)
-                    tag = "%s→%s %s~%s" % (origin, dest, depart, ret)
-                    if per_person is None:
-                        print("  [跳过] %s: %s" % (tag, note))
-                    else:
-                        print("  %s: 每人 ≈ ¥%.0f  (%s)" % (tag, per_person, note))
-                        if cheapest is None or per_person < cheapest[0]:
-                            cheapest = (per_person, "%s\n%s" % (tag, note))
-                    time.sleep(SLEEP_BETWEEN)
+        cheapest = None  # (每人价, 说明)
+        for dest in dests:
+            print("  查 %s→%s ..." % (ORIGIN, dest))
+            price, note = query_dest(dest)
+            if price is None:
+                print("    [无命中] %s" % note)
+            else:
+                print("    %s→%s 每人 ≈ ¥%s（%s）" % (ORIGIN, dest, price, note))
+                if cheapest is None or price < cheapest[0]:
+                    cheapest = (price, "%s→%s %s" % (ORIGIN, dest, note))
+            time.sleep(SLEEP_BETWEEN)
 
         if cheapest is None:
-            print("  %s：本轮没查到有效价格" % target_name)
+            print("  %s：本轮没查到命中日期的有效价格" % target_name)
             continue
 
         per_person, desc = cheapest
-        print("  >>> %s 本轮最低：每人 ≈ ¥%.0f" % (target_name, per_person))
+        print("  >>> %s 本轮最低：每人 ≈ ¥%s" % (target_name, per_person))
         if per_person < threshold:
             alerts.append(
                 "<b>%s</b> 触发低价！<br>"
-                "每人约 <b>¥%.0f</b>（阈值 ¥%d）<br>"
+                "每人约 <b>¥%s</b>（阈值 ¥%d）<br>"
                 "%s<br>"
-                "⚠️ 这是 Google Flights 估算价，请上携程核对后再下单。"
-                % (target_name, per_person, threshold,
-                   desc.replace("\n", "<br>"))
+                "⚠️ 这是 Travelpayouts 缓存的近似价，请上携程/Aviasales 核对后再下单。"
+                % (target_name, per_person, threshold, desc)
             )
 
     if alerts:
