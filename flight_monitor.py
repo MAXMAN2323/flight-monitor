@@ -41,7 +41,7 @@ BEIJING = ["PEK", "PKX"]
 #   CNX = 清迈
 #   MAD = 马德里        BCN = 巴塞罗那
 TARGETS = {
-    "曼谷":                 (BEIJING, ["BKK", "DMK"], 6000),
+    "曼谷":                 (BEIJING, ["BKK", "DMK"], 3000),
     "清迈":                 (BEIJING, ["CNX"],        3000),
     "西班牙(马德里/巴塞罗那)": (BEIJING, ["MAD", "BCN"], 6000),
 }
@@ -166,9 +166,6 @@ def push_wechat(title, content):
 
 def main():
     print("=== 机票监控开始 ===")
-    # ↓↓↓ 临时测试推送（验证微信能否收到，验证后会删除）↓↓↓
-    push_wechat("✈️ 测试推送", "这是一条测试消息，用于确认 PushPlus 能把提醒发到你的微信。收到即代表链路正常，可忽略。")
-    # ↑↑↑ 临时测试推送 ↑↑↑
     combos = [(d, r) for d in DEPART_DATES for r in RETURN_DATES]
     alerts = []
 
