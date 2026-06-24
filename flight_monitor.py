@@ -41,7 +41,7 @@ BEIJING = ["PEK", "PKX"]
 #   CNX = 清迈
 #   MAD = 马德里        BCN = 巴塞罗那
 TARGETS = {
-    "曼谷":                 (BEIJING, ["BKK", "DMK"], 3000),
+    "曼谷":                 (BEIJING, ["BKK", "DMK"], 6000),
     "清迈":                 (BEIJING, ["CNX"],        3000),
     "西班牙(马德里/巴塞罗那)": (BEIJING, ["MAD", "BCN"], 6000),
 }
