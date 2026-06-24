@@ -28,8 +28,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: state.json
-          key: alert-state-${{ github.run_id }}
-          restore-keys: alert-state-
+          key: alert-state-v2-${{ github.run_id }}
+          restore-keys: alert-state-v2-
 
       - name: 运行监控脚本
         env:
@@ -42,4 +42,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: state.json
-          key: alert-state-${{ github.run_id }}
+          key: alert-state-v2-${{ github.run_id }}
