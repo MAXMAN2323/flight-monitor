@@ -35,11 +35,12 @@ ADULTS = 2
 # 北京城市代码（BJS 同时涵盖首都PEK与大兴PKX两个机场）
 ORIGIN = "BJS"
 
-# 你能接受的出发日 / 返回日（脚本会在返回结果里只挑落在这些日子的）
-DEPART_DAYS = {"2026-09-25", "2026-09-26"}
-RETURN_DAYS = {"2026-10-06", "2026-10-07"}
+# 你能接受的出发/返回「日期窗口」（缓存数据有限，放宽成前后几天才查得到，又仍贴合行程）。
+# 目标行程是 9/25或9/26 出发、10/6或10/7 返回，这里各放宽一两天。
+DEPART_MIN, DEPART_MAX = "2026-09-23", "2026-09-28"
+RETURN_MIN, RETURN_MAX = "2026-10-04", "2026-10-09"
 
-# 查询用的月份（接口按月返回缓存里的最低价，再由脚本按上面的具体日子筛）
+# 查询用的月份（日历接口按月返回「每天一个最低价」）
 DEPART_MONTH = "2026-09"
 RETURN_MONTH = "2026-10"
 
@@ -59,7 +60,7 @@ MIN_PRICE_CNY = 200
 # 每次请求之间等待的秒数（礼貌起见，避免触发接口限流）
 SLEEP_BETWEEN = 2
 
-API_URL = "https://api.travelpayouts.com/v1/prices/cheap"
+API_URL = "https://api.travelpayouts.com/v1/prices/calendar"
 
 # =======================================================================
 #  ↑↑↑ 配置到此为止，下面的代码一般不用动 ↑↑↑
@@ -71,9 +72,9 @@ TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN", "").strip()
 
 
 def query_dest(dest):
-    """查一个目的地的最低往返缓存价。
-    返回 (落在你接受日期内的最低每人价, 说明) ；查不到返回 (None, 原因)。
-    同时把所有返回条目打印出来，方便你看接口到底给了什么。"""
+    """查一个目的地：日历接口返回当月每天的最低往返价，脚本筛出落在出行窗口内的最低每人价。
+    返回 (窗口内最低每人价, 说明)；查不到返回 (None, 原因)。
+    同时把返回的条目打印出来，方便看接口数据。"""
     if requests is None:
         return None, "缺少 requests 库"
     try:
@@ -84,6 +85,7 @@ def query_dest(dest):
                 "destination": dest,
                 "depart_date": DEPART_MONTH,
                 "return_date": RETURN_MONTH,
+                "calendar_type": "departure_date",
                 "currency": CURRENCY,
                 "token": TRAVELPAYOUTS_TOKEN,
             },
@@ -102,31 +104,30 @@ def query_dest(dest):
     if not body.get("success"):
         return None, "接口success=false: %s" % str(body.get("error"))[:120]
 
-    entries = (body.get("data") or {}).get(dest) or {}
+    # 日历接口的 data 是 {日期: {price, departure_at, return_at, ...}}
+    entries = body.get("data") or {}
     if not entries:
         return None, "缓存里暂无该航线数据"
 
-    best = None       # (每人价, 出发日, 返回日)
+    best = None        # (每人价, 出发日, 返回日)
     cheapest_any = None
-    for _, info in entries.items():
+    for info in entries.values():
         price = info.get("price")
         dep = (info.get("departure_at") or "")[:10]
         ret = (info.get("return_at") or "")[:10]
         if not price or price < MIN_PRICE_CNY:
             continue
-        # 打印每一条，方便诊断数据质量
         print("      · 出发%s 返回%s 每人¥%s" % (dep or "?", ret or "?", price))
         if cheapest_any is None or price < cheapest_any[0]:
             cheapest_any = (price, dep, ret)
-        if dep in DEPART_DAYS and ret in RETURN_DAYS:
-            if best is None or price < best[0]:
-                best = (price, dep, ret)
+        in_window = (DEPART_MIN <= dep <= DEPART_MAX) and (RETURN_MIN <= ret <= RETURN_MAX)
+        if in_window and (best is None or price < best[0]):
+            best = (price, dep, ret)
 
     if best is not None:
-        return best[0], "出发%s 返回%s（命中你的日期）" % (best[1], best[2])
+        return best[0], "出发%s 返回%s（在你的出行窗口内）" % (best[1], best[2])
     if cheapest_any is not None:
-        # 没有命中你的具体日子，但有别的日期数据——返回 None，附带提示
-        return None, "无命中日期；该月最低是 出发%s 返回%s 每人¥%s" % (
+        return None, "窗口内无数据；该月最低是 出发%s 返回%s 每人¥%s" % (
             cheapest_any[1], cheapest_any[2], cheapest_any[0])
     return None, "无有效价格"
 
