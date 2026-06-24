@@ -3,8 +3,8 @@ name: flight-price-monitor
 
 on:
   schedule:
-    # 每 6 小时运行一次（时间按 UTC，高峰期可能延迟几分钟，属正常现象）
-    - cron: "0 */6 * * *"
+    # 每 2 小时运行一次（时间按 UTC，高峰期可能延迟几分钟，属正常现象）
+    - cron: "0 */2 * * *"
   # 允许在 GitHub 网页上手动点按钮运行（用于测试）
   workflow_dispatch:
 
