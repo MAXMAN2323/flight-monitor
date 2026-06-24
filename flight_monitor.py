@@ -5,16 +5,22 @@
 运行环境：GitHub Actions（每隔几小时自动运行一次，跟你的电脑无关）
 
 它做的事：
-1. 用 fast-flights 抓取 Google Flights（谷歌航班）的【往返】机票价格
+1. 用 fast-flights v3 抓取 Google Flights（谷歌航班）的【往返】机票价格
+   （v3 用模拟真实 Chrome 的方式直连谷歌，并直接返回人民币价）
 2. 遍历你设定的航线 × 日期组合，取“每人最低价”
 3. 低于阈值就通过 PushPlus 推送到你的微信
 """
 
 import os
-import re
 import time
 
-from fast_flights import FlightData, Passengers, get_flights
+from fast_flights import (
+    FlightQuery,
+    Passengers,
+    create_query,
+    get_flights,
+    FlightsNotFound,
+)
 
 try:
     import requests
@@ -46,23 +52,16 @@ TARGETS = {
     "西班牙(马德里/巴塞罗那)": (BEIJING, ["MAD", "BCN"], 6000),
 }
 
-# 美元转人民币的近似汇率。
-# fast-flights 跑在国外服务器时，谷歌常返回美元报价，脚本用它换算成人民币再比较。
-# 不用很精确——收到提醒后你会自己上携程核对。可按当时汇率改这个数。
-USD_TO_CNY = 7.2
+# 向谷歌请求的报价币种。设成 CNY 让谷歌直接返回人民币价，省去汇率换算。
+CURRENCY = "CNY"
 
 # 每人低于这个金额（人民币）一律视为「无效价格」丢弃。
-# 谷歌对部分航线会返回一个价格为 0 的占位航班，不拦掉就会算出「每人 ¥0」并误触发低价提醒。
+# 谷歌对部分航线偶尔会返回一个价格为 0 的占位航班，不拦掉就会算出「每人 ¥0」并误触发低价提醒。
 # 跨国往返机票每人绝不可能低于这个数，按此兜底。
 MIN_PRICE_CNY = 200
 
 # 每次查询之间等待的秒数（防止请求太频繁被谷歌限流）
 SLEEP_BETWEEN = 4
-
-# fast-flights 抓取模式，脚本按顺序尝试，一个失败自动换下一个。
-# local  = 在本机（GitHub 服务器）开真实浏览器，等结果加载完再读，最稳，但慢
-# fallback = 作者的公共 serverless 浏览器，作为备用（可能限流/失效）
-FETCH_MODES = ["local", "fallback"]
 
 # =======================================================================
 #  ↑↑↑ 配置到此为止，下面的代码一般不用动 ↑↑↑
@@ -72,74 +71,45 @@ FETCH_MODES = ["local", "fallback"]
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "").strip()
 
 
-def parse_price(price_str):
-    """把 '$1,234' / '¥3,456' / 'CN¥3,456' 解析为 (人民币金额, 币种说明)。
-    解析不出来返回 (None, 原因)。"""
-    if not price_str:
-        return None, "空价格"
-    s = str(price_str)
-    digits = re.sub(r"[^\d.]", "", s)
-    if not digits:
-        return None, "无法解析: %s" % s
-    try:
-        amount = float(digits)
-    except ValueError:
-        return None, "无法解析: %s" % s
-    if amount <= 0:
-        return None, "价格为0/无效: %s" % s
-
-    up = s.upper()
-    if "¥" in s or "￥" in s or "CNY" in up or "RMB" in up:
-        return amount, "CNY"
-    if "$" in s or "USD" in up:
-        return amount * USD_TO_CNY, "USD→CNY(×%s)" % USD_TO_CNY
-    # 认不出币种：GitHub 服务器多在美国，默认按美元换算，并标注“不确定”
-    return amount * USD_TO_CNY, "未知币种,按USD换算(×%s)" % USD_TO_CNY
-
-
 def query_one(origin, dest, depart, ret):
     """查一个具体往返组合，返回 (该组合每人最低价/人民币, 说明)；失败返回 (None, 错误信息)。"""
-    flight_data = [
-        FlightData(date=depart, from_airport=origin, to_airport=dest),
-        FlightData(date=ret,    from_airport=dest,   to_airport=origin),
-    ]
-    last_err = None
-    for mode in FETCH_MODES:
-        try:
-            result = get_flights(
-                flight_data=flight_data,
-                trip="round-trip",
-                seat="economy",
-                passengers=Passengers(
-                    adults=ADULTS, children=0,
-                    infants_in_seat=0, infants_on_lap=0,
-                ),
-                fetch_mode=mode,
-            )
-            flights = getattr(result, "flights", None) or []
-            best = None
-            best_note = ""
-            for f in flights:
-                cny_total, cur_note = parse_price(getattr(f, "price", None))
-                if cny_total is None:
-                    continue
-                per_person = cny_total / ADULTS  # 谷歌显示的是全部乘客总价 → 折成每人
-                if per_person < MIN_PRICE_CNY:  # 低于兜底线 → 当作占位/异常价，丢弃
-                    continue
-                if best is None or per_person < best:
-                    best = per_person
-                    best_note = "%s 原价%s [%s]" % (
-                        getattr(f, "name", "?"),
-                        getattr(f, "price", "?"),
-                        cur_note,
-                    )
-            if best is not None:
-                return best, best_note
-            last_err = "未解析到任何价格"
-        except Exception as e:  # noqa: BLE001
-            last_err = "%s 模式出错: %s" % (mode, e)
+    query = create_query(
+        flights=[
+            FlightQuery(date=depart, from_airport=origin, to_airport=dest),
+            FlightQuery(date=ret,    from_airport=dest,   to_airport=origin),
+        ],
+        trip="round-trip",
+        seat="economy",
+        passengers=Passengers(
+            adults=ADULTS, children=0,
+            infants_in_seat=0, infants_on_lap=0,
+        ),
+        currency=CURRENCY,
+        language="en",
+    )
+    try:
+        result = get_flights(query)
+    except FlightsNotFound:
+        return None, "谷歌没返回航班"
+    except Exception as e:  # noqa: BLE001
+        return None, "查询出错: %s" % e
+
+    best = None
+    best_note = ""
+    for f in result:
+        price = getattr(f, "price", None)  # v3 直接给数字（已是人民币）
+        if not price or price <= 0:
             continue
-    return None, last_err or "查询失败"
+        per_person = price / ADULTS  # 谷歌显示的是全部乘客总价 → 折成每人
+        if per_person < MIN_PRICE_CNY:  # 低于兜底线 → 当作占位/异常价，丢弃
+            continue
+        if best is None or per_person < best:
+            best = per_person
+            airlines = getattr(f, "airlines", None) or []
+            best_note = "%s 总价¥%s" % ("/".join(airlines) or "?", price)
+    if best is not None:
+        return best, best_note
+    return None, "未解析到有效价格"
 
 
 def push_wechat(title, content):
