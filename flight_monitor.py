@@ -30,8 +30,8 @@ except ImportError:
 ADULTS = 2
 
 # 出发 / 返回的候选日期，脚本会把它们两两组合（4 个组合）
-DEPART_DATES = ["2026-09-26"]  # 诊断用：临时只留1个日期
-RETURN_DATES = ["2026-10-06"]  # 诊断用：临时只留1个日期
+DEPART_DATES = ["2026-09-25", "2026-09-26"]
+RETURN_DATES = ["2026-10-06", "2026-10-07"]
 
 # 北京的两个机场：PEK = 首都，PKX = 大兴
 BEIJING = ["PEK", "PKX"]
@@ -62,7 +62,7 @@ SLEEP_BETWEEN = 4
 # fast-flights 抓取模式，脚本按顺序尝试，一个失败自动换下一个。
 # local  = 在本机（GitHub 服务器）开真实浏览器，等结果加载完再读，最稳，但慢
 # fallback = 作者的公共 serverless 浏览器，作为备用（可能限流/失效）
-FETCH_MODES = ["local"]  # 诊断用：只跑local，暴露其真实报错
+FETCH_MODES = ["local", "fallback"]
 
 # =======================================================================
 #  ↑↑↑ 配置到此为止，下面的代码一般不用动 ↑↑↑
