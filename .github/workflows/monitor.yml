@@ -24,8 +24,22 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt
 
+      - name: 取回上次的提醒记录（去重用）
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: alert-state-${{ github.run_id }}
+          restore-keys: alert-state-
+
       - name: 运行监控脚本
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           TRAVELPAYOUTS_TOKEN: ${{ secrets.TRAVELPAYOUTS_TOKEN }}
         run: python flight_monitor.py
+
+      - name: 保存本次的提醒记录
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: alert-state-${{ github.run_id }}

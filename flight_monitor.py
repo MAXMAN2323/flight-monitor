@@ -17,12 +17,17 @@
 """
 
 import os
+import json
 import time
 
 try:
     import requests
 except ImportError:
     requests = None
+
+# 记录「上次已提醒的最低价」，避免同一个低价每 2 小时重复推送。
+# 这个文件由 GitHub Actions 的缓存在多次运行之间保留。
+STATE_FILE = "state.json"
 
 
 # =======================================================================
@@ -132,6 +137,23 @@ def query_dest(dest):
     return None, "无有效价格"
 
 
+def load_state():
+    """读取上次已提醒的价格记录 {目标名: 上次提醒的最低价}。"""
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_state(state):
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False)
+    except Exception as e:  # noqa: BLE001
+        print("！保存状态失败:", e)
+
+
 def push_wechat(title, content):
     """通过 PushPlus 推送到微信。"""
     if not PUSHPLUS_TOKEN:
@@ -162,6 +184,7 @@ def main():
         print("！未设置 TRAVELPAYOUTS_TOKEN，无法查询。请在 GitHub Secrets 里配置后再运行。")
         return
 
+    state = load_state()
     alerts = []
     for target_name, (dests, threshold) in TARGETS.items():
         print("\n--- 监控目标：%s（每人阈值 ¥%d）---" % (target_name, threshold))
@@ -183,14 +206,27 @@ def main():
 
         per_person, desc = cheapest
         print("  >>> %s 本轮最低：每人 ≈ ¥%s" % (target_name, per_person))
+
+        prev = state.get(target_name)  # 上次已提醒的价（仅低于阈值时才记）
         if per_person < threshold:
-            alerts.append(
-                "<b>%s</b> 触发低价！<br>"
-                "每人约 <b>¥%s</b>（阈值 ¥%d）<br>"
-                "%s<br>"
-                "⚠️ 这是 Travelpayouts 缓存的近似价，请上携程/Aviasales 核对后再下单。"
-                % (target_name, per_person, threshold, desc)
-            )
+            if prev is None or per_person < prev:
+                # 首次跌破阈值，或刷新了更低价 → 才提醒
+                alerts.append(
+                    "<b>%s</b> 触发低价！<br>"
+                    "每人约 <b>¥%s</b>（阈值 ¥%d）<br>"
+                    "%s<br>"
+                    "⚠️ 这是 Travelpayouts 缓存的近似价，请上携程/Aviasales 核对后再下单。"
+                    % (target_name, per_person, threshold, desc)
+                )
+                print("      → 触发提醒（上次提醒价：%s）" % (prev if prev is not None else "无"))
+            else:
+                print("      → 已提醒过同等或更低价(¥%s)，本次不重复推送" % prev)
+            state[target_name] = per_person if prev is None else min(prev, per_person)
+        else:
+            # 高于阈值 → 清掉记录，下次再跌破会重新提醒
+            state.pop(target_name, None)
+
+    save_state(state)
 
     if alerts:
         push_wechat("✈️ 机票低价提醒", "<br><br>".join(alerts))
