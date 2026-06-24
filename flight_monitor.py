@@ -59,8 +59,10 @@ MIN_PRICE_CNY = 200
 # 每次查询之间等待的秒数（防止请求太频繁被谷歌限流）
 SLEEP_BETWEEN = 4
 
-# fast-flights 抓取模式，脚本按顺序尝试，一个失败自动换下一个
-FETCH_MODES = ["fallback", "common"]
+# fast-flights 抓取模式，脚本按顺序尝试，一个失败自动换下一个。
+# local  = 在本机（GitHub 服务器）开真实浏览器，等结果加载完再读，最稳，但慢
+# fallback = 作者的公共 serverless 浏览器，作为备用（可能限流/失效）
+FETCH_MODES = ["local", "fallback"]
 
 # =======================================================================
 #  ↑↑↑ 配置到此为止，下面的代码一般不用动 ↑↑↑

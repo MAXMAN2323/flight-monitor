@@ -1,2 +1,2 @@
-fast-flights==2.2
+fast-flights[local]==2.2
 requests
